@@ -1,66 +1,84 @@
-name: build
-
+name: Android debug APK
 on:
   push:
-  pull_request:
   workflow_dispatch:
-
+permissions:
+  contents: read
 jobs:
-  apk:
+  build:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python on the runner
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-
-      - uses: actions/setup-java@v4
+          python-version: '3.12'
+      - name: Extract full project
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+          root=Path.cwd().resolve()
+          with zipfile.ZipFile('LocalLlm.zip') as archive:
+              for name in archive.namelist():
+                  if not (root/name).resolve().is_relative_to(root):
+                      raise SystemExit('Unsafe ZIP entry: '+name)
+              archive.extractall(root)
+          PY
+          chmod +x LocalLlm/gradlew LocalLlm/setup.sh LocalLlm/ci/provision-glslc.sh
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
-
-      - name: Install Linux tools
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: |
+            LocalLlm/*.gradle.kts
+            LocalLlm/app/*.gradle.kts
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android build dependencies
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl tar xz-utils unzip git
-
-      - uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK, NDK and CMake
-        run: |
-          set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" \
-            "ndk;28.2.13676358" "cmake;3.31.6"
-
-      # Must run BEFORE Gradle. It writes GLSLC, Vulkan_GLSLC_EXECUTABLE and
-      # PATH into GITHUB_ENV / GITHUB_PATH so every later step can see them.
-      - name: Provision host glslc
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.31.6"
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > LocalLlm/local.properties
+      - name: Provision host Vulkan shader compiler
+        shell: bash
+        env:
+          VULKAN_SDK_VERSION: ${{ vars.VULKAN_SDK_VERSION }}
         run: bash LocalLlm/ci/provision-glslc.sh
-
-      - name: Verify host glslc is visible to later steps
-        run: |
-          set -euo pipefail
-          test -n "${GLSLC:-}" || { echo "GLSLC was not exported by provisioning" >&2; exit 1; }
-          test -x "$GLSLC"
-          "$GLSLC" --version
-
-      - name: Fetch native dependencies
+      - name: Prepare native sources
         working-directory: LocalLlm
+        shell: bash
         run: ./setup.sh
-
-      - name: Host tests
+      - name: Run host regression tests
         working-directory: LocalLlm
-        run: python3 -m unittest discover -s tools/tests -p 'test_*.py' -v
-
+        shell: bash
+        run: python3 -m unittest discover -s tools/tests -v
       - name: Build debug APK
         working-directory: LocalLlm
-        run: ./gradlew --no-daemon :app:assembleDebug
-
-      - uses: actions/upload-artifact@v4
+        shell: bash
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+      - name: Run JVM regression tests
+        working-directory: LocalLlm
+        shell: bash
+        run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
         with:
-          name: localllm-debug-apk
+          name: LocalLlm-debug-apk
           path: LocalLlm/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalLlm-build-diagnostics
+          path: |
+            LocalLlm/native-dependencies.lock.json
+            LocalLlm/app/build/reports/tests/
+            LocalLlm/app/.cxx/**/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
