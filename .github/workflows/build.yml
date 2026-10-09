@@ -12,6 +12,51 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The repo root holds LocalLlm.zip. Everything below builds from the
+      # unpacked copy, so the zip is the single source of truth for the project.
+      - name: Unpack LocalLlm.zip
+        run: |
+          set -euo pipefail
+          if [[ ! -f LocalLlm.zip ]]; then
+            echo "LocalLlm.zip is not at the repo root. Root contents:" >&2
+            ls -la >&2
+            exit 1
+          fi
+          sudo apt-get update
+          sudo apt-get install -y unzip
+          rm -rf LocalLlm
+          unzip -q LocalLlm.zip
+          if [[ ! -d LocalLlm ]]; then
+            echo "LocalLlm.zip must contain a top-level LocalLlm/ folder. Entries:" >&2
+            unzip -Z1 LocalLlm.zip | cut -d/ -f1 | sort -u >&2
+            exit 1
+          fi
+          # Zips made on other systems can lose execute bits; make CI's scripts runnable.
+          chmod +x LocalLlm/gradlew LocalLlm/setup.sh LocalLlm/ci/provision-glslc.sh
+
+      - name: Check project layout
+        run: |
+          set -uo pipefail
+          missing=0
+          for f in \
+            LocalLlm/ci/provision-glslc.sh \
+            LocalLlm/setup.sh \
+            LocalLlm/gradlew \
+            LocalLlm/tools/prepare_headers.py \
+            LocalLlm/tools/generate_opencl_dispatch.py \
+            LocalLlm/tools/verify_native_api.py \
+            LocalLlm/tools/lock_dependencies.py \
+            LocalLlm/tools/tests/test_host.py \
+            LocalLlm/app/src/main/cpp/cmake/HostGlslc.cmake \
+            LocalLlm/app/src/main/cpp/CMakeLists.txt; do
+            if [[ ! -f "$f" ]]; then echo "MISSING in LocalLlm.zip: $f" >&2; missing=1; fi
+          done
+          if (( missing )); then
+            echo "Re-zip the LocalLlm/ folder (with ci/ and tools/) as LocalLlm.zip at the repo root." >&2
+            exit 1
+          fi
+          echo "Project layout OK"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -26,9 +71,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y curl tar xz-utils unzip git
 
-      # Use a private, writable SDK root. The runner's preinstalled SDK at
-      # /usr/local/lib/android/sdk is shared and root-owned, which is what
-      # setup-android@v3 was tripping over. We only borrow its sdkmanager binary.
+      # Private, writable SDK root. The runner's preinstalled SDK is shared and
+      # root-owned; we only borrow its sdkmanager binary.
       - name: Install Android SDK, NDK and CMake
         run: |
           set -euo pipefail
@@ -36,7 +80,6 @@ jobs:
           mkdir -p "$SDK_ROOT"
           SDKMANAGER="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | head -n 1)"
           echo "Using sdkmanager: $SDKMANAGER"
-          # Feed 'y' via process substitution so a closed pipe can't trip pipefail.
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses < <(yes) >/dev/null
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
             "platform-tools" \
@@ -47,10 +90,11 @@ jobs:
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
 
-      # Must run BEFORE Gradle. It writes GLSLC, Vulkan_GLSLC_EXECUTABLE and
-      # PATH into GITHUB_ENV / GITHUB_PATH so every later step can see them.
+      # Must run BEFORE Gradle: it exports GLSLC, Vulkan_GLSLC_EXECUTABLE and PATH
+      # through GITHUB_ENV / GITHUB_PATH for every later step.
       - name: Provision host glslc
-        run: bash LocalLlm/ci/provision-glslc.sh
+        working-directory: LocalLlm
+        run: bash ci/provision-glslc.sh
 
       - name: Verify host glslc is visible to later steps
         run: |
