@@ -25,6 +25,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # `tools` is a retired SDK package; requesting it makes sdkmanager exit 1.
+          packages: platform-tools
 
       - name: Install Android build packages
         run: |
