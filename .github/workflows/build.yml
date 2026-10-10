@@ -1,122 +1,72 @@
-name: build
+name: Android build and tests
 
 on:
   push:
-  pull_request:
+    branches:
+      - fix-mobile-vulkan-stability
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  apk:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out bundle
+        uses: actions/checkout@v4
 
-      # The repo root holds LocalLlm.zip. Everything below builds from the
-      # unpacked copy, so the zip is the single source of truth for the project.
-      - name: Unpack LocalLlm.zip
-        run: |
-          set -euo pipefail
-          if [[ ! -f LocalLlm.zip ]]; then
-            echo "LocalLlm.zip is not at the repo root. Root contents:" >&2
-            ls -la >&2
-            exit 1
-          fi
-          sudo apt-get update
-          sudo apt-get install -y unzip
-          rm -rf LocalLlm
-          unzip -q LocalLlm.zip
-          if [[ ! -d LocalLlm ]]; then
-            echo "LocalLlm.zip must contain a top-level LocalLlm/ folder. Entries:" >&2
-            unzip -Z1 LocalLlm.zip | cut -d/ -f1 | sort -u >&2
-            exit 1
-          fi
-          # Zips made on other systems can lose execute bits; make CI's scripts runnable.
-          chmod +x LocalLlm/gradlew LocalLlm/setup.sh LocalLlm/ci/provision-glslc.sh
-
-      - name: Check project layout
-        run: |
-          set -uo pipefail
-          missing=0
-          for f in \
-            LocalLlm/ci/provision-glslc.sh \
-            LocalLlm/setup.sh \
-            LocalLlm/gradlew \
-            LocalLlm/tools/prepare_headers.py \
-            LocalLlm/tools/generate_opencl_dispatch.py \
-            LocalLlm/tools/verify_native_api.py \
-            LocalLlm/tools/lock_dependencies.py \
-            LocalLlm/tools/tests/test_host.py \
-            LocalLlm/app/src/main/cpp/cmake/HostGlslc.cmake \
-            LocalLlm/app/src/main/cpp/CMakeLists.txt; do
-            if [[ ! -f "$f" ]]; then echo "MISSING in LocalLlm.zip: $f" >&2; missing=1; fi
-          done
-          if (( missing )); then
-            echo "Re-zip the LocalLlm/ folder (with ci/ and tools/) as LocalLlm.zip at the repo root." >&2
-            exit 1
-          fi
-          echo "Project layout OK"
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: actions/setup-java@v4
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
-      - name: Install Linux tools
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build packages
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl tar xz-utils unzip git
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.31.6"
 
-      # Private, writable SDK root. The runner's preinstalled SDK is shared and
-      # root-owned; we only borrow its sdkmanager binary.
-      - name: Install Android SDK, NDK and CMake
+      - name: Extract project ZIP
+        run: unzip -q LocalLlm.zip -d "$RUNNER_TEMP/localllm"
+
+      - name: Check shell and Python syntax
+        working-directory: ${{ runner.temp }}/localllm/LocalLlm
         run: |
-          set -euo pipefail
-          SDK_ROOT="$RUNNER_TEMP/android-sdk"
-          mkdir -p "$SDK_ROOT"
-          SDKMANAGER="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | head -n 1)"
-          echo "Using sdkmanager: $SDKMANAGER"
-          "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses < <(yes) >/dev/null
-          "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
-            "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "ndk;28.2.13676358" \
-            "cmake;3.31.6"
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          bash -n setup.sh gradlew ci/provision-glslc.sh
+          python3 -m py_compile tools/*.py tools/tests/test_host.py
 
-      # Must run BEFORE Gradle: it exports GLSLC, Vulkan_GLSLC_EXECUTABLE and PATH
-      # through GITHUB_ENV / GITHUB_PATH for every later step.
-      - name: Provision host glslc
-        working-directory: LocalLlm
-        run: bash ci/provision-glslc.sh
+      - name: Run native host regression tests
+        working-directory: ${{ runner.temp }}/localllm/LocalLlm
+        run: python3 -m unittest discover -s tools/tests -v
 
-      - name: Verify host glslc is visible to later steps
-        run: |
-          set -euo pipefail
-          test -n "${GLSLC:-}" || { echo "GLSLC was not exported by provisioning" >&2; exit 1; }
-          test -x "$GLSLC"
-          "$GLSLC" --version
-
-      - name: Fetch native dependencies
-        working-directory: LocalLlm
+      - name: Prepare pinned native dependencies
+        working-directory: ${{ runner.temp }}/localllm/LocalLlm
         run: ./setup.sh
 
-      - name: Host tests
-        working-directory: LocalLlm
-        run: python3 -m unittest discover -s tools/tests -p 'test_*.py' -v
+      - name: Install host GLSL compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslc
 
-      - name: Build debug APK
-        working-directory: LocalLlm
-        run: ./gradlew --no-daemon :app:assembleDebug
+      - name: Validate host GLSL compiler
+        working-directory: ${{ runner.temp }}/localllm/LocalLlm
+        run: |
+          GLSLC_PATH="$(command -v glslc)"
+          GLSLC="$GLSLC_PATH" ./ci/provision-glslc.sh
+          echo "GLSLC=$GLSLC_PATH" >> "$GITHUB_ENV"
+          echo "Vulkan_GLSLC_EXECUTABLE=$GLSLC_PATH" >> "$GITHUB_ENV"
 
-      - uses: actions/upload-artifact@v4
+      - name: Run Kotlin tests and assemble Android APK
+        working-directory: ${{ runner.temp }}/localllm/LocalLlm
+        run: ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest :app:assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
         with:
-          name: localllm-debug-apk
-          path: LocalLlm/app/build/outputs/apk/debug/*.apk
+          name: LocalLlm-debug-apk
+          path: ${{ runner.temp }}/localllm/LocalLlm/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
