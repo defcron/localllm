@@ -3,7 +3,11 @@ name: Android build and tests
 on:
   push:
     branches:
+      - main
       - fix-mobile-vulkan-stability
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
