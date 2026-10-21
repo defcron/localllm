@@ -1,0 +1,51 @@
+name: One-time source ZIP migration
+
+on:
+  push:
+    branches:
+      - finish-project-ci-docs
+    paths:
+      - .github/workflows/flatten-source.yml
+
+permissions:
+  contents: write
+
+jobs:
+  flatten:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out migration branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Expand source into repository root
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f LocalLlm.zip
+          mkdir -p "$RUNNER_TEMP/localllm-expanded"
+          unzip -q LocalLlm.zip -d "$RUNNER_TEMP/localllm-expanded"
+          source_dir="$RUNNER_TEMP/localllm-expanded/LocalLlm"
+          test -d "$source_dir"
+          test -f "$source_dir/gradlew"
+          cp -a "$source_dir/." .
+          rm LocalLlm.zip
+          test -f settings.gradle -o -f settings.gradle.kts
+          test -x ./gradlew
+          git status --short
+
+      - name: Commit flattened source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No source layout changes to commit."
+            exit 0
+          fi
+          git commit -m "Move Android project source into repository root"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
