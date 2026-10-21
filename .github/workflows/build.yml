@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - fix-mobile-vulkan-stability
+      - finish-project-ci-docs
   pull_request:
     branches:
       - main
@@ -18,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Check out bundle
+      - name: Check out source
         uses: actions/checkout@v4
 
       - name: Set up Java 17
@@ -37,21 +38,23 @@ jobs:
         run: |
           sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.31.6"
 
-      - name: Extract project ZIP
-        run: unzip -q LocalLlm.zip -d "$RUNNER_TEMP/localllm"
+      - name: Verify repository layout
+        run: |
+          test -f settings.gradle || test -f settings.gradle.kts
+          test -x ./gradlew
+          test -f app/build.gradle || test -f app/build.gradle.kts
+          test -f setup.sh
+          test -f ci/provision-glslc.sh
 
       - name: Check shell and Python syntax
-        working-directory: ${{ runner.temp }}/localllm/LocalLlm
         run: |
           bash -n setup.sh gradlew ci/provision-glslc.sh
           python3 -m py_compile tools/*.py tools/tests/test_host.py
 
       - name: Run native host regression tests
-        working-directory: ${{ runner.temp }}/localllm/LocalLlm
         run: python3 -m unittest discover -s tools/tests -v
 
       - name: Prepare pinned native dependencies
-        working-directory: ${{ runner.temp }}/localllm/LocalLlm
         run: ./setup.sh
 
       - name: Install host GLSL compiler
@@ -60,7 +63,6 @@ jobs:
           sudo apt-get install -y glslc
 
       - name: Validate host GLSL compiler
-        working-directory: ${{ runner.temp }}/localllm/LocalLlm
         run: |
           GLSLC_PATH="$(command -v glslc)"
           GLSLC="$GLSLC_PATH" ./ci/provision-glslc.sh
@@ -68,12 +70,11 @@ jobs:
           echo "Vulkan_GLSLC_EXECUTABLE=$GLSLC_PATH" >> "$GITHUB_ENV"
 
       - name: Run Kotlin tests and assemble Android APK
-        working-directory: ${{ runner.temp }}/localllm/LocalLlm
         run: ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest :app:assembleDebug
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: LocalLlm-debug-apk
-          path: ${{ runner.temp }}/localllm/LocalLlm/app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
