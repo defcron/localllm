@@ -4,13 +4,13 @@ Android local-LLM application with Vulkan/GPU support.
 
 ## Source layout
 
-The Android project is currently distributed as `LocalLlm.zip` in this repository. CI extracts it into a temporary directory before building. The archive should contain a `LocalLlm/` project directory with the Gradle wrapper, Android app, native build setup, and host regression tests.
+The Android project is stored directly in the repository root. The Gradle wrapper, Android app, native build setup, CI helpers, and host regression tests are tracked as ordinary source files; CI does not extract a source ZIP.
 
 ## Build and test
 
-The GitHub Actions workflow runs on pushes to `main`, pushes to `fix-mobile-vulkan-stability`, pull requests targeting `main`, and manual dispatches.
+The GitHub Actions workflow runs on pushes to `main` and `fix-mobile-vulkan-stability`, pull requests targeting `main`, and manual dispatches.
 
-The workflow installs the pinned Android SDK/NDK/CMake versions, checks shell and Python syntax, runs host regression tests, prepares pinned native dependencies, validates the host GLSL compiler, runs Android unit tests, and assembles a debug APK.
+The workflow installs the pinned Android SDK/NDK/CMake versions, verifies the root-level project layout, checks shell and Python syntax, runs host regression tests, prepares pinned native dependencies, validates the host GLSL compiler, runs Android unit tests, and assembles a debug APK.
 
 To download the APK, open the latest successful **Android build and tests** run under the repository's **Actions** tab and download the `LocalLlm-debug-apk` artifact. Artifacts are temporary CI outputs, not signed production releases.
 
@@ -20,4 +20,4 @@ A green CI run confirms the automated checks and debug APK assembly passed on th
 
 ## Contributing
 
-Keep the project archive and the workflow's expected internal path in sync. When changing the archive, verify that `unzip -l LocalLlm.zip` shows `LocalLlm/` at its root and that the Gradle wrapper is executable after extraction.
+Keep build scripts and workflow paths rooted at the repository root. Do not reintroduce a ZIP-only source layout; source files should remain reviewable and directly editable in GitHub.
