@@ -10,6 +10,13 @@ inline std::string backend_key(std::string text) {
     return text;
 }
 inline bool valid_backend(const std::string& key) { return key=="vulkan" || key=="opencl"; }
+struct BatchConfig { int batch; int ubatch; };
+inline BatchConfig batch_config(const std::string& backend, bool use_gpu) {
+    if (!use_gpu) return {512, 512};
+    // Vulkan keeps the conservative microbatch that avoids transient Adreno memory pressure.
+    // OpenCL can use the full configured batch for more efficient prompt-prefill operations.
+    return backend_key(backend) == "opencl" ? BatchConfig{128, 128} : BatchConfig{128, 32};
+}
 inline int offloaded_count(const char* text) {
     const auto offset=std::string(text).find("offloaded ");
     if(offset==std::string::npos) return -1;
