@@ -12,19 +12,28 @@ data class Msg(val role: String, val content: String)
 
 fun interface TokenSink { fun onToken(bytes: ByteArray): Boolean }
 
-/** Decodes a stream of UTF-8 byte chunks, holding back incomplete trailing characters. */
+/** Decodes UTF-8 token chunks without allocating fresh input/output buffers for every token. */
 class Utf8Stream {
     private val dec = Charsets.UTF_8.newDecoder()
         .onMalformedInput(CodingErrorAction.REPLACE).onUnmappableCharacter(CodingErrorAction.REPLACE)
-    private var carry = ByteArray(0)
+    private var input = ByteBuffer.allocate(512)
+    private var output = CharBuffer.allocate(512)
     fun push(chunk: ByteArray): String {
-        val all = carry + chunk
-        val inBuf = ByteBuffer.wrap(all)
-        val out = CharBuffer.allocate(all.size + 4)
-        dec.decode(inBuf, out, false)
-        carry = ByteArray(inBuf.remaining()).also { inBuf.get(it) }
-        out.flip()
-        return out.toString()
+        if (chunk.size > input.remaining()) {
+            input.flip()
+            val pending = ByteArray(input.remaining()).also { input.get(it) }
+            input = ByteBuffer.allocate(maxOf(input.capacity() * 2, pending.size + chunk.size))
+            input.put(pending)
+        }
+        if (output.capacity() < chunk.size + 4) output = CharBuffer.allocate(chunk.size + 4)
+        input.put(chunk)
+        input.flip()
+        output.clear()
+        val result = dec.decode(input, output, false)
+        check(!result.isOverflow) { "UTF-8 output buffer unexpectedly overflowed" }
+        input.compact() // preserve only an incomplete trailing code point
+        output.flip()
+        return output.toString()
     }
 }
 
