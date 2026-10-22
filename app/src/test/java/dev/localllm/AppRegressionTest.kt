@@ -15,6 +15,12 @@ class AppRegressionTest {
         assertEquals(GpuBackend.VULKAN,GpuSettings().backend);assertEquals(DEFAULT_GPU_LAYERS,GpuSettings().gpuLayers)
         assertEquals(16_384,DEFAULT_CONTEXT_SIZE)
     }
+    @Test fun utf8StreamHandlesSplitMultibyteCharacters() {
+        val stream = Utf8Stream()
+        val bytes = "a😀éz".toByteArray(Charsets.UTF_8)
+        val chunks = listOf(bytes.copyOfRange(0, 2), bytes.copyOfRange(2, 4), bytes.copyOfRange(4, bytes.size))
+        assertEquals("a😀éz", chunks.joinToString("") { stream.push(it) })
+    }
     @Test fun acceptsAllAndExplicitCpu() {
         assertEquals(-1,GpuSettings.parseLayers("-1"));assertEquals(0,GpuSettings.parseLayers("0"))
     }
