@@ -33,8 +33,8 @@ std::string g_backend_info;
 int g_offloaded=-1;
 std::string g_err;                     // last llama.cpp error lines, shown in the UI
 
-// 512-token GPU batches can create excessive transient memory pressure on mobile Vulkan/Adreno.
-// Keep GPU prefill conservative while retaining the larger batch in explicit CPU mode.
+// Keep Vulkan microbatches conservative for mobile Adreno memory stability. OpenCL uses a
+// larger 512-token host batch split into 128-token microbatches; CPU mode uses 512/512.
 int g_n_batch = 512;
 int g_n_ubatch = 512;
 
