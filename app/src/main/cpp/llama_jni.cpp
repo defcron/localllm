@@ -202,12 +202,20 @@ Java_dev_localllm_LlamaEngine_nativeGenerate(JNIEnv* env, jobject, jbyteArray jp
     const llama_vocab* vocab = llama_model_get_vocab(g_model);
     std::string prompt = to_str(env, jprompt);
 
-    int need = -llama_tokenize(vocab, prompt.c_str(), (int) prompt.size(), nullptr, 0, true, true);
-    if (need <= 0) { g_gen_err = "tokenization failed (empty or unsupported prompt)"; return -1; }
-    std::vector<llama_token> toks(need);
-    if (llama_tokenize(vocab, prompt.c_str(), (int) prompt.size(), toks.data(), need, true, true) < 0) {
-        g_gen_err = "tokenization failed"; return -1;
+    const auto tokenize_start = std::chrono::steady_clock::now();
+    // Token count cannot exceed UTF-8 byte count by much; allocate a byte-sized upper bound
+    // to avoid tokenizing every prompt twice. Keep a retry for unusual tokenizers that need more.
+    std::vector<llama_token> toks(prompt.size() + 8);
+    int token_count = llama_tokenize(vocab, prompt.c_str(), (int) prompt.size(),
+                                     toks.data(), (int) toks.size(), true, true);
+    if (token_count < 0) {
+        toks.resize((size_t) -token_count);
+        token_count = llama_tokenize(vocab, prompt.c_str(), (int) prompt.size(),
+                                     toks.data(), (int) toks.size(), true, true);
     }
+    const double tokenize_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - tokenize_start).count();
+    if (token_count <= 0) { g_gen_err = "tokenization failed (empty or unsupported prompt)"; return -1; }
+    toks.resize((size_t) token_count);
     // chat templates often emit BOS themselves; don't double it
     if (toks.size() > 1 && toks[0] == llama_vocab_bos(vocab) && toks[1] == toks[0]) toks.erase(toks.begin());
 
@@ -296,9 +304,9 @@ Java_dev_localllm_LlamaEngine_nativeGenerate(JNIEnv* env, jobject, jbyteArray jp
     }
     llama_sampler_free(smpl);
     double gen_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
-    char st[320];
-    snprintf(st, sizeof st, "prompt %d tok (%d cached, %d new) | prefill %.1fs @ %.1f tok/s | %d tok @ %.1f tok/s (decode %.1fs @ %.1f tok/s, sample %.1fs, output %.1fs)",
-             (int)toks.size(),(int)common,(int)(toks.size()-common),prefill_s,
+    char st[420];
+    snprintf(st, sizeof st, "prompt %d tok (%d cached, %d new) | tokenize %.2fs | prefill %.1fs @ %.1f tok/s | %d tok @ %.1f tok/s (decode %.1fs @ %.1f tok/s, sample %.1fs, output %.1fs)",
+             (int)toks.size(),(int)common,(int)(toks.size()-common),tokenize_s,prefill_s,
              prefill_s>0?(toks.size()-common)/prefill_s:0.0,
              produced,gen_s>0?produced/gen_s:0.0,
              decode_s,decode_s>0?produced/decode_s:0.0,sample_s,output_s);
