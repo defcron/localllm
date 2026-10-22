@@ -13,9 +13,10 @@ inline bool valid_backend(const std::string& key) { return key=="vulkan" || key=
 struct BatchConfig { int batch; int ubatch; };
 inline BatchConfig batch_config(const std::string& backend, bool use_gpu) {
     if (!use_gpu) return {512, 512};
-    // Vulkan keeps the conservative microbatch that avoids transient Adreno memory pressure.
-    // OpenCL can use the full configured batch for more efficient prompt-prefill operations.
-    return backend_key(backend) == "opencl" ? BatchConfig{128, 128} : BatchConfig{128, 32};
+    // Keep Vulkan conservative for mobile Adreno stability. OpenCL uses larger host batches
+    // split into bounded microbatches: this reduces per-call overhead without a 512-token GPU
+    // working set. Explicit CPU mode retains the upstream-friendly 512/512 configuration.
+    return backend_key(backend) == "opencl" ? BatchConfig{512, 128} : BatchConfig{128, 32};
 }
 inline int offloaded_count(const char* text) {
     const auto offset=std::string(text).find("offloaded ");
