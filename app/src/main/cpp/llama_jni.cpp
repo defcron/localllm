@@ -84,8 +84,9 @@ Java_dev_localllm_LlamaEngine_nativeLoad(JNIEnv* env,jobject,jstring jpath,jint 
         if(!inited) { llama_log_set(log_cb,nullptr);llama_backend_init();inited=true; }
         free_all();g_err.clear();g_offloaded=-1;
         const bool use_gpu=gpuLayers!=0;
-        g_n_batch = use_gpu ? 128 : 512;
-        g_n_ubatch = use_gpu ? 32 : 512;
+        const auto batch = localllm::batch_config(requested, use_gpu);
+        g_n_batch = batch.batch;
+        g_n_ubatch = batch.ubatch;
         if(use_gpu) {
             if(requested=="opencl" && !localllm_opencl_driver_available()) {
                 LOGE("OpenCL driver: %s",localllm_opencl_driver_error());
@@ -115,6 +116,7 @@ Java_dev_localllm_LlamaEngine_nativeLoad(JNIEnv* env,jobject,jstring jpath,jint 
         } else {
             g_devices={nullptr};g_backend_info="CPU (explicit -ngl 0)";
         }
+        g_backend_info += " | batch " + std::to_string(g_n_batch) + " / microbatch " + std::to_string(g_n_ubatch);
         llama_model_params mp=llama_model_default_params();
         mp.devices=g_devices.data();mp.n_gpu_layers=gpuLayers;
         mp.split_mode=LLAMA_SPLIT_MODE_NONE;mp.main_gpu=0;
@@ -262,10 +264,14 @@ Java_dev_localllm_LlamaEngine_nativeGenerate(JNIEnv* env, jobject, jbyteArray jp
     jmethodID onToken = env->GetMethodID(cls, "onToken", "([B)Z");
 
     int produced = 0;
+    double sample_s = 0.0, output_s = 0.0, decode_s = 0.0;
     while (produced < maxNew && !g_cancel) {
+        auto sample_start = std::chrono::steady_clock::now();
         llama_token t = llama_sampler_sample(smpl, g_ctx, -1);
+        sample_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - sample_start).count();
         if (llama_vocab_is_eog(vocab, t)) break;
 
+        auto output_start = std::chrono::steady_clock::now();
         char buf[256];
         int n = llama_token_to_piece(vocab, t, buf, sizeof(buf), 0, true);
         if (n < 0) n = 0;
@@ -273,9 +279,12 @@ Java_dev_localllm_LlamaEngine_nativeGenerate(JNIEnv* env, jobject, jbyteArray jp
         jboolean cont = env->CallBooleanMethod(sink, onToken, arr);
         env->DeleteLocalRef(arr);
         if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+        output_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - output_start).count();
 
         llama_batch b = llama_batch_get_one(&t, 1);
+        auto decode_start = std::chrono::steady_clock::now();
         int rc = llama_decode(g_ctx, b);
+        decode_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
         if (rc != 0) {
             g_gen_err = "decode failed while generating (code " + std::to_string(rc) + "). " + g_err;
             if (produced == 0) { llama_sampler_free(smpl); return -1; }
@@ -287,11 +296,12 @@ Java_dev_localllm_LlamaEngine_nativeGenerate(JNIEnv* env, jobject, jbyteArray jp
     }
     llama_sampler_free(smpl);
     double gen_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
-    char st[200];
-    snprintf(st, sizeof st, "prompt %d tok (%d cached, %d new) | prefill %.1fs @ %.1f tok/s | %d tok @ %.1f tok/s",
+    char st[320];
+    snprintf(st, sizeof st, "prompt %d tok (%d cached, %d new) | prefill %.1fs @ %.1f tok/s | %d tok @ %.1f tok/s (decode %.1fs @ %.1f tok/s, sample %.1fs, output %.1fs)",
              (int)toks.size(),(int)common,(int)(toks.size()-common),prefill_s,
              prefill_s>0?(toks.size()-common)/prefill_s:0.0,
-             produced,gen_s>0?produced/gen_s:0.0);
+             produced,gen_s>0?produced/gen_s:0.0,
+             decode_s,decode_s>0?produced/decode_s:0.0,sample_s,output_s);
     g_stats = st;
     return produced;
 }
