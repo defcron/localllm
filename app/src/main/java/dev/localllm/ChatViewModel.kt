@@ -193,6 +193,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
                     val ui = UiMsg("assistant", ""); messages += ui
                     val sb = StringBuilder(); var last = 0L
+                    val toolClose = "</tool_call>"
+                    var toolCloseTail = ""
+                    var toolCloseSeen = false
                     ui.text = "Reading prompt…"
                     val poll = launch {                        // live prefill progress (slow on phones)
                         while (true) {
@@ -207,13 +210,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val n = try {
                         engine.generate(prompt, 1024, 0.7f) { piece ->
                             sb.append(piece)
+                            if (!toolCloseSeen) {
+                                val probe = toolCloseTail + piece
+                                toolCloseSeen = probe.contains(toolClose)
+                                toolCloseTail = probe.takeLast(toolClose.length - 1)
+                            }
                             val now = SystemClock.uptimeMillis()
                             if (now - last > 40) {
                                 val snapshot = sb.toString()
                                 viewModelScope.launch(Dispatchers.Main) { ui.text = snapshot }
                                 last = now
                             }   // throttle recomposition
-                            !stopped && !sb.contains("</tool_call>")
+                            !stopped && !toolCloseSeen
                         }
                     } finally { poll.cancel(); prefs.edit().putBoolean("generating", false).apply() }
                     ui.text = sb.toString()
