@@ -11,7 +11,7 @@ The project source is tracked in the repository itself: `app/`, Gradle build fil
 - Vulkan is the default backend; OpenCL (Adreno) is selectable.
 - GPU layers (`-ngl`) defaults to `-1` (request all layers); `0` explicitly selects CPU.
 - Context size defaults to 16,384 tokens; the prior 4,096 default is migrated on upgrade.
-- GPU backends use batch/microbatch sizes of 128/32 to reduce transient GPU-memory pressure; explicit CPU mode retains 512/512.
+- Vulkan uses batch/microbatch 128/32 for conservative mobile GPU memory use. OpenCL uses 512/128 (larger prompt batches split into bounded microbatches); explicit CPU mode retains 512/512.
 - Backend/layer changes persist and apply when Reload model / apply settings is pressed.
 - Active reports backend, device, requested layers, and actual offload count when reported by the native loader; unknown actual counts stay explicitly unknown.
 - GPU load errors do not automatically switch the application to CPU-only mode. Individual unsupported graph operations can still run on CPU.
