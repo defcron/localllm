@@ -33,18 +33,37 @@ class AppRegressionTest {
     private fun tool(name:String,description:String="desc",schema:JsonObject=buildJsonObject{put("type","object")})=McpTool(name,description,schema)
     private fun functions(prompt:String)=prompt.substringAfter("<tools>\n").substringBefore("\n</tools>")
         .lines().map{Json.parseToJsonElement(it).jsonObject["function"]!!.jsonObject}
-    @Test fun all150ToolsSurviveOldBudget() {
-        val tools=(0 until 150).map{tool("tool_$it","description ".repeat(30))};val prompt=ToolPrompt.build(tools)
-        assertTrue(prompt.length>6000);assertEquals(tools.map{it.name},functions(prompt).map{it["name"]!!.jsonPrimitive.content})
+    @Test fun largeCatalogKeepsNamesButOmitsUnneededSchemas() {
+        val tools=(0 until 150).map{tool("tool_$it","description ".repeat(30))}
+        val prompt=ToolPrompt.build(tools)
+        assertTrue(prompt.contains("tool_149"))
+        assertTrue(prompt.length < tools.sumOf { it.schema.toString().length + it.description.length })
+        assertEquals(listOf(ToolPrompt.DISCOVERY_TOOL_NAME),functions(prompt).map{it["name"]!!.jsonPrimitive.content})
+        assertFalse(functions(prompt).any{it["name"]!!.jsonPrimitive.content=="tool_0"})
     }
-    @Test fun oversizedFirstToolDoesNotHideNext() {
-        val functions=functions(ToolPrompt.build(listOf(tool("huge","x".repeat(8000)),tool("last"))))
-        assertEquals(2,functions.size);assertEquals("last",functions.last()["name"]!!.jsonPrimitive.content)
-        assertEquals(8000,functions.first()["description"]!!.jsonPrimitive.content.length)
+    @Test fun catalogDescriptionIsBoundedAndAllNamesRemainVisible() {
+        val prompt=ToolPrompt.build(listOf(tool("huge","x".repeat(8000)),tool("last")))
+        assertTrue(prompt.contains("- huge:"))
+        assertTrue(prompt.contains("- last"))
+        assertFalse(prompt.contains("x".repeat(1000)))
     }
-    @Test fun completeSchemaPreserved() {
+    @Test fun completeSchemaPreservedOnlyWhenExposed() {
         val schema=Json.parseToJsonElement("""{"type":"object","additionalProperties":false,"required":["title"],"properties":{"title":{"type":"string","default":"x"},"examples":{"type":"array","items":{"type":"integer"}}}}""").jsonObject
-        assertEquals(schema,functions(ToolPrompt.build(listOf(tool("schema",schema=schema)))).single()["parameters"])
+        val item=tool("schema",schema=schema)
+        assertFalse(functions(ToolPrompt.build(listOf(item))).any{it["name"]!!.jsonPrimitive.content=="schema"})
+        assertEquals(schema,functions(ToolPrompt.build(listOf(item),setOf("schema"))).single{it["name"]!!.jsonPrimitive.content=="schema"}["parameters"])
+    }
+    @Test fun selectorFindsRelevantToolsAndLeavesDiscoveryFallback() {
+        val tools=listOf(tool("create_issue","Create a new GitHub issue"),tool("search_issues","Search GitHub issues by text"),tool("play_track","Play a music track"))
+        assertEquals("search_issues",ToolPrompt.selectLikelyTools("search GitHub issues",tools).first().name)
+        assertEquals(listOf(ToolPrompt.DISCOVERY_TOOL_NAME),functions(ToolPrompt.build(tools)).map{it["name"]!!.jsonPrimitive.content})
+    }
+    @Test fun explicitToolDiscoveryReturnsBoundedRankedResults() {
+        val tools=(0 until 20).map{tool("tool_$it","operation number $it")}
+        val found=ToolPrompt.searchTools("operation number 17",tools,4)
+        assertTrue(found.size <= 4)
+        assertTrue(found.any{it.name=="tool_17"})
+        assertTrue(ToolPrompt.searchTools("",tools).isEmpty())
     }
     @Test fun deterministicAndEmptyCatalog() {
         val tools=listOf(tool("one"));assertEquals(ToolPrompt.build(tools),ToolPrompt.build(tools));assertFalse(ToolPrompt.build(emptyList()).contains("<tools>"))
