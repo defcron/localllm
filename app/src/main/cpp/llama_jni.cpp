@@ -33,8 +33,8 @@ std::string g_backend_info;
 int g_offloaded=-1;
 std::string g_err;                     // last llama.cpp error lines, shown in the UI
 
-// 512-token GPU batches can create excessive transient memory pressure on mobile Vulkan/Adreno.
-// Keep GPU prefill conservative while retaining the larger batch in explicit CPU mode.
+// Keep Vulkan microbatches conservative for mobile Adreno memory stability. OpenCL uses a
+// larger 512-token host batch split into 128-token microbatches; CPU mode uses 512/512.
 int g_n_batch = 512;
 int g_n_ubatch = 512;
 
@@ -84,8 +84,9 @@ Java_dev_localllm_LlamaEngine_nativeLoad(JNIEnv* env,jobject,jstring jpath,jint 
         if(!inited) { llama_log_set(log_cb,nullptr);llama_backend_init();inited=true; }
         free_all();g_err.clear();g_offloaded=-1;
         const bool use_gpu=gpuLayers!=0;
-        g_n_batch = use_gpu ? 128 : 512;
-        g_n_ubatch = use_gpu ? 32 : 512;
+        const auto batch = localllm::batch_config(requested, use_gpu);
+        g_n_batch = batch.batch;
+        g_n_ubatch = batch.ubatch;
         if(use_gpu) {
             if(requested=="opencl" && !localllm_opencl_driver_available()) {
                 LOGE("OpenCL driver: %s",localllm_opencl_driver_error());
@@ -115,6 +116,7 @@ Java_dev_localllm_LlamaEngine_nativeLoad(JNIEnv* env,jobject,jstring jpath,jint 
         } else {
             g_devices={nullptr};g_backend_info="CPU (explicit -ngl 0)";
         }
+        g_backend_info += " | batch " + std::to_string(g_n_batch) + " / microbatch " + std::to_string(g_n_ubatch);
         llama_model_params mp=llama_model_default_params();
         mp.devices=g_devices.data();mp.n_gpu_layers=gpuLayers;
         mp.split_mode=LLAMA_SPLIT_MODE_NONE;mp.main_gpu=0;
@@ -200,12 +202,20 @@ Java_dev_localllm_LlamaEngine_nativeGenerate(JNIEnv* env, jobject, jbyteArray jp
     const llama_vocab* vocab = llama_model_get_vocab(g_model);
     std::string prompt = to_str(env, jprompt);
 
-    int need = -llama_tokenize(vocab, prompt.c_str(), (int) prompt.size(), nullptr, 0, true, true);
-    if (need <= 0) { g_gen_err = "tokenization failed (empty or unsupported prompt)"; return -1; }
-    std::vector<llama_token> toks(need);
-    if (llama_tokenize(vocab, prompt.c_str(), (int) prompt.size(), toks.data(), need, true, true) < 0) {
-        g_gen_err = "tokenization failed"; return -1;
+    const auto tokenize_start = std::chrono::steady_clock::now();
+    // Token count cannot exceed UTF-8 byte count by much; allocate a byte-sized upper bound
+    // to avoid tokenizing every prompt twice. Keep a retry for unusual tokenizers that need more.
+    std::vector<llama_token> toks(prompt.size() + 8);
+    int token_count = llama_tokenize(vocab, prompt.c_str(), (int) prompt.size(),
+                                     toks.data(), (int) toks.size(), true, true);
+    if (token_count < 0) {
+        toks.resize((size_t) -token_count);
+        token_count = llama_tokenize(vocab, prompt.c_str(), (int) prompt.size(),
+                                     toks.data(), (int) toks.size(), true, true);
     }
+    const double tokenize_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - tokenize_start).count();
+    if (token_count <= 0) { g_gen_err = "tokenization failed (empty or unsupported prompt)"; return -1; }
+    toks.resize((size_t) token_count);
     // chat templates often emit BOS themselves; don't double it
     if (toks.size() > 1 && toks[0] == llama_vocab_bos(vocab) && toks[1] == toks[0]) toks.erase(toks.begin());
 
@@ -262,10 +272,14 @@ Java_dev_localllm_LlamaEngine_nativeGenerate(JNIEnv* env, jobject, jbyteArray jp
     jmethodID onToken = env->GetMethodID(cls, "onToken", "([B)Z");
 
     int produced = 0;
+    double sample_s = 0.0, output_s = 0.0, decode_s = 0.0;
     while (produced < maxNew && !g_cancel) {
+        auto sample_start = std::chrono::steady_clock::now();
         llama_token t = llama_sampler_sample(smpl, g_ctx, -1);
+        sample_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - sample_start).count();
         if (llama_vocab_is_eog(vocab, t)) break;
 
+        auto output_start = std::chrono::steady_clock::now();
         char buf[256];
         int n = llama_token_to_piece(vocab, t, buf, sizeof(buf), 0, true);
         if (n < 0) n = 0;
@@ -273,9 +287,12 @@ Java_dev_localllm_LlamaEngine_nativeGenerate(JNIEnv* env, jobject, jbyteArray jp
         jboolean cont = env->CallBooleanMethod(sink, onToken, arr);
         env->DeleteLocalRef(arr);
         if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+        output_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - output_start).count();
 
         llama_batch b = llama_batch_get_one(&t, 1);
+        auto decode_start = std::chrono::steady_clock::now();
         int rc = llama_decode(g_ctx, b);
+        decode_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
         if (rc != 0) {
             g_gen_err = "decode failed while generating (code " + std::to_string(rc) + "). " + g_err;
             if (produced == 0) { llama_sampler_free(smpl); return -1; }
@@ -287,11 +304,12 @@ Java_dev_localllm_LlamaEngine_nativeGenerate(JNIEnv* env, jobject, jbyteArray jp
     }
     llama_sampler_free(smpl);
     double gen_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
-    char st[200];
-    snprintf(st, sizeof st, "prompt %d tok (%d cached, %d new) | prefill %.1fs @ %.1f tok/s | %d tok @ %.1f tok/s",
-             (int)toks.size(),(int)common,(int)(toks.size()-common),prefill_s,
+    char st[420];
+    snprintf(st, sizeof st, "prompt %d tok (%d cached, %d new) | tokenize %.2fs | prefill %.1fs @ %.1f tok/s | %d tok @ %.1f tok/s (decode %.1fs @ %.1f tok/s, sample %.1fs, output %.1fs)",
+             (int)toks.size(),(int)common,(int)(toks.size()-common),tokenize_s,prefill_s,
              prefill_s>0?(toks.size()-common)/prefill_s:0.0,
-             produced,gen_s>0?produced/gen_s:0.0);
+             produced,gen_s>0?produced/gen_s:0.0,
+             decode_s,decode_s>0?produced/decode_s:0.0,sample_s,output_s);
     g_stats = st;
     return produced;
 }

@@ -58,6 +58,9 @@ class HostTests(unittest.TestCase):
 #include <cassert>
 int main() {
  assert(localllm::valid_layers(99));assert(localllm::valid_layers(-1));assert(localllm::valid_layers(0));
+ auto opencl=localllm::batch_config("opencl",true);assert(opencl.batch==512 && opencl.ubatch==128);
+ auto vulkan=localllm::batch_config("vulkan",true);assert(vulkan.batch==128 && vulkan.ubatch==32);
+ auto cpu=localllm::batch_config("opencl",false);assert(cpu.batch==512 && cpu.ubatch==512);
  assert(!localllm::valid_layers(-2));assert(!localllm::valid_layers(10000));
  assert(localllm::backend_key("Vulkan")=="vulkan");assert(localllm::valid_backend("opencl"));
  assert(!localllm::valid_backend("cuda"));
@@ -128,6 +131,14 @@ int main(){
     def test_gpu_flags_and_no_prompt_cutoff(self):
         text=(ROOT/'app/src/main/cpp/CMakeLists.txt').read_text()
         self.assertIn('set(GGML_VULKAN ON',text);self.assertIn('set(GGML_OPENCL ON',text)
+        native=(ROOT/'app/src/main/cpp/llama_jni.cpp').read_text()
+        self.assertIn('batch_config(requested, use_gpu)',native)
+        self.assertIn('decode %.1fs',native);self.assertIn('output %.1fs',native)
+        self.assertIn('tokenize %.2fs',native)
+        chat=(ROOT/'app/src/main/java/dev/localllm/ChatViewModel.kt').read_text()
+        self.assertIn('toolCloseTail',chat);self.assertNotIn('sb.contains("</tool_call>")',chat)
+        engine=(ROOT/'app/src/main/java/dev/localllm/LlamaEngine.kt').read_text()
+        self.assertIn('ByteBuffer.allocate(512)',engine);self.assertIn('input.compact()',engine)
         prompt=(ROOT/'app/src/main/java/dev/localllm/ToolPrompt.kt').read_text()
         self.assertIn('put("parameters", tool.schema)',prompt);self.assertNotIn('6000',prompt)
 
