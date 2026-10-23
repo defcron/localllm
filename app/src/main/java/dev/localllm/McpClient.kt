@@ -157,6 +157,11 @@ class McpHub {
         })
         errors
     }
+    fun hasTool(name: String): Boolean = catalog.routes.containsKey(name)
+
+    fun searchTools(query: String, limit: Int = 6): List<McpTool> =
+        ToolPrompt.searchTools(query, catalog.tools, limit.coerceIn(1, 8))
+
     suspend fun call(name: String, args: JsonObject): String = mutex.withLock {
         val route = catalog.routes[name] ?: return@withLock "ERROR: unknown tool '$name'"
         try { route.client.callTool(route.originalName, args) }
