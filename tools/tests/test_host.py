@@ -34,6 +34,12 @@ extern CL_API_ENTRY void* CL_API_CALL clGetExtensionFunctionAddress(const char* 
 }
 """
 class HostTests(unittest.TestCase):
+    def test_vulkan_headers_and_hpp_are_pinned_to_matching_release(self):
+        setup=(ROOT/'setup.sh').read_text()
+        self.assertIn('Vulkan-Headers" "$vendor/Vulkan-Headers" v1.4.365',setup)
+        self.assertIn('Vulkan-Hpp" "$vendor/Vulkan-Hpp" v1.4.365',setup)
+        self.assertNotIn('Vulkan-Headers" "$vendor/Vulkan-Headers" main',setup)
+        self.assertNotIn('Vulkan-Hpp" "$vendor/Vulkan-Hpp" main',setup)
     def test_callback_parameter_names(self):
         context=next(x for x in dispatch.declarations(HEADER) if x[1]=='clCreateContext')
         self.assertEqual(context[3],['properties','num_devices','devices','pfn_notify','user_data','errcode_ret'])
