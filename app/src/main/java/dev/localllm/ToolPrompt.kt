@@ -7,7 +7,7 @@ internal object ToolPrompt {
     const val DISCOVERY_TOOL_NAME = "__localllm_discover_mcp_tools"
     private val stopWords = setOf("the","and","for","with","from","that","this","then","into","please","could","would","should","want","need","use","using","tool","tools","mcp","server","find","make","help","about","what","when","where","how","all","any","can","you","are","was","were","get","set")
 
-    private fun tokens(value: String): Set<String> = Regex("[a-z0-9]+").findAll(value.lowercase()).map { it.value }.filter { it.length >= 3 && it !in stopWords }.toSet()
+    private fun tokens(value: String): Set<String> = Regex("[a-z0-9]+").findAll(value.lowercase()).map { it.value }.filter { (it.length >= 3 || it.any(Char::isDigit)) && it !in stopWords }.toSet()
 
     /** Fast, deterministic local routing. A miss never hides tools: discovery remains available. */
     fun selectLikelyTools(query: String, tools: List<McpTool>, limit: Int = 6): List<McpTool> {
