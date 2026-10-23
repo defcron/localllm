@@ -49,7 +49,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val hub = McpHub()
     private val modelStore = ModelStore(app)
     private val history = mutableListOf<Msg>()
-    private var sys = ""                       // cached: a byte-stable prefix keeps the KV cache warm
+    private var sys = ""                       // cached until the exposed tool set changes
+    private val activeToolNames = linkedSetOf<String>()
     private var job: Job? = null
     private var connectJob: Job? = null
     private var connectVersion = 0
@@ -163,31 +164,42 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         connectJob = viewModelScope.launch {
             try {
                 val errors = hub.connect(configured)
-                toolCount = hub.tools.size; sys = ""; systemPrompt()
-                status = "MCP: $toolCount tools · all $toolsSent included" +
+                toolCount = hub.tools.size; activeToolNames.clear(); sys = ""; systemPrompt()
+                status = "MCP: $toolCount tools · $toolsSent schemas loaded on demand" +
                     if (errors.isEmpty()) "" else " · " + errors.joinToString("; ")
             } catch (e: CancellationException) { throw e }
               catch (e: Exception) { status = "MCP failed: ${e.message}" }
             finally { if (version == connectVersion) connecting = false }
         }
     }
-    fun newChat() { if (!busy) { history.clear(); messages.clear() } }
+    fun newChat() {
+        if (!busy) {
+            history.clear(); messages.clear()
+            activeToolNames.clear(); sys = ""; toolsSent = 0
+        }
+    }
     fun stop() { stopped = true; engine.cancel() }
     private fun systemPrompt(): String {
         if (sys.isNotEmpty()) return sys
-        toolsSent = hub.tools.size
-        return ToolPrompt.build(hub.tools).also { sys = it }
+        toolsSent = activeToolNames.size
+        return ToolPrompt.build(hub.tools, activeToolNames).also { sys = it }
     }
 
     fun send(text: String) {
         if (busy || loading || connecting || !modelReady || text.isBlank()) return
         stopped = false; busy = true
+        // Cheap local routing reduces schema tokens; catalog/discovery remains the fallback.
+        activeToolNames.clear()
+        activeToolNames += ToolPrompt.selectLikelyTools(text, hub.tools).map { it.name }
+        sys = ""
+        toolsSent = activeToolNames.size
         messages += UiMsg("user", text); history += Msg("user", text)
         job = viewModelScope.launch {
             try {
                 var round = 0
                 while (round < 6) {            // cap agent loop: model -> tool -> model ...
                     round++
+                    val schemasAtStart = activeToolNames.toSet()
                     val prompt = engine.template(listOf(Msg("system", systemPrompt())) + history)
                     if (prompt.isEmpty()) { status = "This model's chat template isn't supported"; break }
 
@@ -248,9 +260,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val resp = StringBuilder()
                     for (c in calls) {
                         val name = c.name
-                        val result = if (name == null) "ERROR: could not parse tool call JSON"
-                                     else hub.call(name, c.args ?: JsonObject(emptyMap()))
-                        messages += UiMsg("tool", "🔧 ${name ?: "invalid call"}(${c.args ?: c.raw})\n→ ${result.take(600)}")
+                        val args = c.args ?: JsonObject(emptyMap())
+                        val result = when {
+                            name == null -> "ERROR: could not parse tool call JSON"
+                            name == ToolPrompt.DISCOVERY_TOOL_NAME -> {
+                                val query = (args["query"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                                val requestedLimit = (args["limit"] as? JsonPrimitive)?.intOrNull ?: 6
+                                val found = hub.searchTools(query, requestedLimit)
+                                val added = found.filter { activeToolNames.add(it.name) }
+                                if (added.isNotEmpty()) sys = ""
+                                if (found.isEmpty()) "No matching tools found for '${query.take(160)}'. Try a more specific or broader query. The compact catalog still lists every configured tool."
+                                else "Loaded complete schemas for: ${found.joinToString { it.name }}. Their full schemas will be available in the next model turn. Call a real tool only after checking its schema."
+                            }
+                            hub.hasTool(name) && name !in schemasAtStart -> {
+                                activeToolNames.add(name); sys = ""
+                                "Safety fallback: '$name' exists, but its schema was not present when this call was generated, so the call was NOT executed. Its full schema will be available next turn; retry using that schema."
+                            }
+                            else -> hub.call(name, args)
+                        }
+                        messages += UiMsg("tool", "🔧 ${name ?: "invalid call"}(${args})\n→ ${result.take(600)}")
                         resp.append("<tool_response>\n").append(result).append("\n</tool_response>\n")
                     }
                     history += Msg("user", resp.toString().trimEnd())   // ChatML models expect tool output as a user turn

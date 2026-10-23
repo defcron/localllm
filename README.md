@@ -15,8 +15,8 @@ The project source is tracked in the repository itself: `app/`, Gradle build fil
 - Backend/layer changes persist and apply when Reload model / apply settings is pressed.
 - Active reports backend, device, requested layers, and actual offload count when reported by the native loader; unknown actual counts stay explicitly unknown.
 - GPU load errors do not automatically switch the application to CPU-only mode. Individual unsupported graph operations can still run on CPU.
-- Every discovered MCP tool, description, and unchanged input schema is included. Overlapping names get aliases routed back to each server's original tool name.
-- Refresh all tools updates the catalog; automatic list-change subscription is not implemented. Large catalogs require sufficient context; tools are not hidden.
+- All discovered MCP tools remain available in a compact name/description catalog; only locally selected or explicitly discovered tools include full input schemas in the model prompt. A built-in schema-discovery call loads relevant schemas on demand, and a missed selection can safely expose a schema and retry without executing malformed arguments. Tool calls still route through MCP with original server tool names. Overlapping names get aliases routed back to each server's original tool name.
+- The local lexical selector is a best-effort optimization, not an access-control filter: the full catalog and explicit discovery fallback remain available. Refresh all tools updates the catalog; automatic list-change subscription is not implemented.
 
 ## Build and test with GitHub Actions
 
